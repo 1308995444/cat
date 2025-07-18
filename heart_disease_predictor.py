@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import shap
 import matplotlib.pyplot as plt
-from catboost import CatBoostClassifier
+import catboost
 from matplotlib import font_manager
 
 

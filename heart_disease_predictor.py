@@ -5,30 +5,12 @@ import pandas as pd
 import shap
 import matplotlib.pyplot as plt
 from catboost import CatBoostClassifier
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
 from matplotlib import font_manager
 
-# 设置中文字体（可选）
-try:
-    font_path = "SimHei.ttf"  # 替换为你的中文字体路径
-    font_prop = font_manager.FontProperties(fname=font_path)
-    plt.rcParams['font.family'] = font_prop.get_name()
-except:
-    st.warning("中文字体加载失败，将使用默认字体")
-
 # 模型加载
-@st.cache_resource
-def load_model():
-    try:
-        model = joblib.load('cat.pkl')
-        if not hasattr(model, 'predict'):
-            st.error("加载的模型无效！请检查模型文件")
-            st.stop()
-        return model
-    except Exception as e:
-        st.error(f"模型加载失败: {str(e)}")
-        st.stop()
-
-model = load_model()
+model = joblib.load('cat.pkl')
 
 # 特征定义
 feature_ranges = {
@@ -59,9 +41,24 @@ feature_ranges = {
     'pain': {"type": "categorical", "options": [0, 1], "desc": "慢性疼痛/Chronic pain (0:无/No, 1:有/Yes)"}
 }
 
+# 创建独热编码器
+categorical_features = [name for name, props in feature_ranges.items() if props["type"] == "categorical"]
+numerical_features = [name for name, props in feature_ranges.items() if props["type"] == "numerical"]
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', 'passthrough', numerical_features),
+        ('cat', OneHotEncoder(), categorical_features)
+    ])
+
+# 准备训练数据格式（仅用于拟合编码器）
+sample_data = {feature: [props["options"][0]] for feature, props in feature_ranges.items()}
+sample_df = pd.DataFrame(sample_data)
+preprocessor.fit(sample_df)  # 拟合编码器
+
 # 界面布局
-st.title("抑郁症风险预测模型 (Depression Risk-Prediction Model)")
-st.header("请输入以下特征值:")
+st.title("Depression Risk-Prediction Model with SHAP Visualization")
+st.header("Enter the following feature values:")
 
 # 输入表单
 feature_values = {}
@@ -85,76 +82,64 @@ for feature, properties in feature_ranges.items():
     feature_values[feature] = value
 
 # 预测与解释
-if st.button("预测/Predict"):
+if st.button("Predict"):
     try:
-        # 创建DataFrame并确保列顺序
-        features = pd.DataFrame([feature_values])
+        # 创建DataFrame
+        input_df = pd.DataFrame([feature_values])
         
-        # 类型转换
-        for feature, props in feature_ranges.items():
-            if props["type"] == "categorical":
-                features[feature] = features[feature].astype(int)
+        # 应用独热编码
+        encoded_data = preprocessor.transform(input_df)
         
-        # 检查特征匹配
+        # 获取特征名称
+        feature_names = numerical_features.copy()
+        for col in categorical_features:
+            for opt in feature_ranges[col]["options"]:
+                feature_names.append(f"{col}_{opt}")
+        
+        # 创建编码后的DataFrame
+        encoded_df = pd.DataFrame(encoded_data.toarray(), columns=feature_names)
+        
+        # 确保列顺序与模型训练时一致
         if hasattr(model, 'feature_names_in_'):
-            missing = set(model.feature_names_in_) - set(features.columns)
-            if missing:
-                st.error(f"缺少必要特征: {missing}")
-                st.stop()
-            
-            # 重新排序特征
-            features = features[model.feature_names_in_]
+            # 添加缺失的特征列（设为0）
+            for col in model.feature_names_in_:
+                if col not in encoded_df.columns:
+                    encoded_df[col] = 0
+            encoded_df = encoded_df[model.feature_names_in_]
         
         # 进行预测
-        predicted_class = model.predict(features)[0]
-        predicted_proba = model.predict_proba(features)[0]
+        predicted_class = model.predict(encoded_df)[0]
+        predicted_proba = model.predict_proba(encoded_df)[0]
         probability = predicted_proba[predicted_class] * 100
 
         # 结果显示
-        risk_text = "高风险/High risk" if predicted_class == 1 else "低风险/Low risk"
-        result_text = f"预测概率/Predicted probability: {probability:.2f}% ({risk_text})"
-        
+        text_en = f"Predicted probability: {probability:.2f}% ({'High risk' if predicted_class == 1 else 'Low risk'})"
         fig, ax = plt.subplots(figsize=(10,2))
-        ax.text(0.5, 0.7, result_text, 
-                fontsize=14, ha='center', va='center')
+        ax.text(0.5, 0.7, text_en, 
+                fontsize=14, ha='center', va='center', fontname='Arial')
         ax.axis('off')
         st.pyplot(fig)
 
         # SHAP解释
-        try:
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(features)
-            
-            plt.figure()
-            if isinstance(shap_values, list):
-                # 多分类情况
-                shap.force_plot(
-                    explainer.expected_value[predicted_class],
-                    shap_values[predicted_class][0],
-                    features.iloc[0],
-                    matplotlib=True,
-                    show=False
-                )
-            else:
-                # 二分类情况
-                shap.force_plot(
-                    explainer.expected_value,
-                    shap_values[0],
-                    features.iloc[0],
-                    matplotlib=True,
-                    show=False
-                )
-            st.pyplot(plt.gcf())
-            plt.close()
-        except Exception as e:
-            st.warning(f"SHAP解释生成失败: {str(e)}")
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(encoded_df)
+        
+        if isinstance(shap_values, list):
+            shap_values_class = shap_values[predicted_class][0]
+            expected_value = explainer.expected_value[predicted_class]
+        else:
+            shap_values_class = shap_values[0]
+            expected_value = explainer.expected_value
 
+        plt.figure()
+        shap_plot = shap.force_plot(
+            expected_value,
+            shap_values_class,
+            encoded_df.iloc[0],
+            matplotlib=True,
+            show=False
+        )
+        st.pyplot(plt.gcf())
+        
     except Exception as e:
-        st.error(f"预测过程中发生错误: {str(e)}")
-        st.error("请检查输入数据是否正确")
-
-# 添加模型信息展示
-if st.checkbox("显示模型信息/Show model info"):
-    if hasattr(model, 'feature_names_in_'):
-        st.write("模型特征顺序/Model feature order:", model.feature_names_in_)
-    st.write("模型参数/Model parameters:", model.get_params())
+        st.error(f"Prediction failed: {str(e)}")

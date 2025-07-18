@@ -1,28 +1,17 @@
 import streamlit as st
 import joblib
+import numpy as np
 import pandas as pd
 import shap
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import make_column_transformer
-import numpy as np
+from catboost import CatBoostClassifier
+from matplotlib import font_manager
 
-# 1. 模型加载
-@st.cache_resource
-def load_model():
-    try:
-        model = joblib.load('cat.pkl')
-        if not hasattr(model, 'predict'):
-            st.error("Invalid model file!")
-            st.stop()
-        return model
-    except Exception as e:
-        st.error(f"Model loading failed: {str(e)}")
-        st.stop()
 
-model = load_model()
+# 模型加载
+model = joblib.load('cat.pkl')
 
-# 2. 特征定义（保持不变）
+# 特征定义
 feature_ranges = {
     'gender': {"type": "categorical", "options": [1, 2], "desc": "性别/Gender (1:男/Male, 2:女/Female)"},
     'srh': {"type": "categorical", "options": [1,2,3,4,5], "desc": "自评健康/Self-rated health (1-5: 很差/Very poor 到 很好/Very good)"},
@@ -51,92 +40,68 @@ feature_ranges = {
     'pain': {"type": "categorical", "options": [0, 1], "desc": "慢性疼痛/Chronic pain (0:无/No, 1:有/Yes)"}
 }
 
-# 3. 创建预处理转换器
-categorical_features = [name for name, props in feature_ranges.items() if props["type"] == "categorical"]
-numerical_features = [name for name, props in feature_ranges.items() if props["type"] == "numerical"]
+# 界面布局
+st.title("Depression Risk-Prediction Model with SHAP Visualization")
+st.header("Enter the following feature values:")
 
-preprocessor = make_column_transformer(
-    (OneHotEncoder(categories=[props["options"] for props in feature_ranges.values() if props["type"] == "categorical"]), 
-     categorical_features),
-    remainder='passthrough'
-)
-
-# 4. 拟合预处理器（使用所有可能的分类值）
-sample_data = {feature: [props["options"][0]] for feature, props in feature_ranges.items()}
-sample_df = pd.DataFrame(sample_data)
-preprocessor.fit(sample_df)
-
-# 5. 获取特征名称
-def get_feature_names(column_transformer):
-    feature_names = []
-    for name, transformer, features in column_transformer.transformers_:
-        if name == 'remainder':
-            continue
-        if hasattr(transformer, 'get_feature_names_out'):
-            feature_names.extend(transformer.get_feature_names_out(features))
-        else:
-            feature_names.extend(features)
-    return feature_names
-
-feature_names = get_feature_names(preprocessor)
-
-# 6. Streamlit界面
-st.title("Depression Risk Prediction")
-feature_values = {}
-
-for feature, props in feature_ranges.items():
-    if props["type"] == "numerical":
-        feature_values[feature] = st.number_input(
-            props["desc"],
-            min_value=props["min"],
-            max_value=props["max"],
-            value=props["default"],
-            step=props.get("step", 1.0),
-            format=props.get("format", "%f")
+# 输入表单
+feature_values = []
+for feature, properties in feature_ranges.items():
+    if properties["type"] == "numerical":
+        value = st.number_input(
+            label=properties["desc"],
+            min_value=float(properties["min"]),
+            max_value=float(properties["max"]),
+            value=float(properties["default"]),
+            step=properties.get("step", 1.0),
+            format=properties.get("format", "%f"),
+            key=f"num_{feature}"
         )
     else:
-        feature_values[feature] = st.selectbox(
-            props["desc"],
-            options=props["options"]
+        value = st.selectbox(
+            label=properties["desc"],
+            options=properties["options"],
+            key=f"cat_{feature}"
         )
+    feature_values.append(value)
 
+features = np.array([feature_values])
+
+# 预测与解释
 if st.button("Predict"):
-    try:
-        # 7. 准备输入数据
-        input_df = pd.DataFrame([feature_values])
-        
-        # 8. 应用预处理
-        encoded_data = preprocessor.transform(input_df)
-        encoded_df = pd.DataFrame(encoded_data, columns=feature_names)
-        
-        # 9. 确保特征匹配
-        if hasattr(model, 'feature_names_in_'):
-            missing = set(model.feature_names_in_) - set(encoded_df.columns)
-            extra = set(encoded_df.columns) - set(model.feature_names_in_)
-            
-            if missing:
-                st.error(f"Missing features: {missing}")
-                st.stop()
-            
-            encoded_df = encoded_df[model.feature_names_in_]
-        
-        # 10. 进行预测
-        prediction = model.predict(encoded_df)
-        proba = model.predict_proba(encoded_df)
-        
-        # 11. 显示结果
-        st.success(f"Prediction: {'High risk' if prediction[0] == 1 else 'Low risk'}")
-        st.metric("Probability", f"{proba[0][prediction[0]]*100:.2f}%")
-        
-        # 12. SHAP解释
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer(encoded_df)
-        
-        fig, ax = plt.subplots()
-        shap.plots.waterfall(shap_values[0], max_display=10, show=False)
-        st.pyplot(fig)
-        
-    except Exception as e:
-        st.error(f"Prediction error: {str(e)}")
-        st.write("Model expects:", getattr(model, 'feature_names_in_', "Unknown"))
-        st.write("Features provided:", encoded_df.columns.tolist() if 'encoded_df' in locals() else "Not generated")
+    predicted_class = model.predict(features)[0]
+    predicted_proba = model.predict_proba(features)[0]
+    probability = predicted_proba[predicted_class] * 100
+
+    # 结果显示
+    text_en = f"Predicted probability: {probability:.2f}% ({'High risk' if predicted_class == 1 else 'Low risk'})"
+    fig, ax = plt.subplots(figsize=(10,2))
+    ax.text(0.5, 0.7, text_en, 
+            fontsize=14, ha='center', va='center', fontname='Arial')
+    ax.axis('off')
+    st.pyplot(fig)
+
+    # SHAP解释
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(pd.DataFrame([feature_values], columns=feature_ranges.keys()))
+    
+    if isinstance(shap_values, list):
+
+        shap_values_class = shap_values[predicted_class][0]
+        expected_value = explainer.expected_value[predicted_class]
+    else:
+
+        shap_values_class = shap_values[0]
+        expected_value = explainer.expected_value
+
+    feature_df = pd.DataFrame([feature_values], columns=feature_ranges.keys())
+
+    plt.figure()
+    shap_plot = shap.force_plot(
+        expected_value,
+        shap_values_class,
+        feature_df,
+        matplotlib=True,
+        show=False
+    )
+    st.pyplot(plt.gcf())
